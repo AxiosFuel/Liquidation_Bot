@@ -86,7 +86,10 @@ export class HealthChecker {
 
     /**
      * Calculate health factor for a loan
-     * Health Factor = (Collateral Value USD) / (Loan Value USD)
+     * Health Factor = (Collateral Value USD) / (Debt Value USD)
+     * 
+     * IMPORTANT: Debt = repayment_amount (principal + interest), NOT principal_amount
+     * Using principal would overestimate health factor and miss liquidatable loans
      */
     private async calculateHealthFactor(loan: Loan): Promise<number> {
         try {
@@ -107,21 +110,24 @@ export class HealthChecker {
 
             // Calculate values in USD
             const collateralAmount = parseFloat(loan.collateral_amount);
-            const loanAmount = parseFloat(loan.principal_amount);
+            // CRITICAL: Use repayment_amount (total debt = principal + interest)
+            // NOT principal_amount, which would underestimate debt and overestimate HF
+            const debtAmount = parseFloat(loan.repayment_amount || loan.principal_amount);
 
             const collateralValueUsd = collateralAmount * collateralPrice;
-            const loanValueUsd = loanAmount * loanPrice;
+            const debtValueUsd = debtAmount * loanPrice;
 
-            // Calculate health factor
-            const healthFactor = collateralValueUsd / loanValueUsd;
+            // Calculate health factor: HF = Collateral Value / Debt Value
+            // HF < 1.0 means undercollateralized (collateral worth less than debt)
+            const healthFactor = collateralValueUsd / debtValueUsd;
 
             logger.debug(`Health factor calculated for loan ${loan.id}`, {
                 collateralAmount,
                 collateralPrice,
                 collateralValueUsd,
-                loanAmount,
+                debtAmount,
                 loanPrice,
-                loanValueUsd,
+                debtValueUsd,
                 healthFactor,
             });
 

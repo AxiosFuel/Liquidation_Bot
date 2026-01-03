@@ -12,7 +12,8 @@ export interface Loan {
     ends_at: number;   // Unix timestamp (seconds)
     collateral_amount: string; // numeric
     collateral_token: string;  // mapped from collateral_asset
-    principal_amount: string;  // numeric, mapped from loan_amount
+    principal_amount: string;  // numeric, original loan amount
+    repayment_amount: string;  // numeric, total debt = principal + interest
     asset_token: string;       // mapped from loan_asset
     borrower: string;
     lender: string;
