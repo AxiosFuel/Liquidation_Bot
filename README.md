@@ -20,140 +20,65 @@ This bot monitors active loans on the Axios Finance platform and automatically e
 - ✅ Comprehensive logging
 - ✅ Environment-agnostic deployment
 
-## Architecture
+## Architecture Overview
+This bot is a **keeper** responsible for maintaining protocol solvency. It continuously monitors all active loans on the Fuel Network and liquidates any position that becomes undercollateralized or expired.
 
-```
-┌─────────────────┐
-│   Supabase DB   │
-│  (Active Loans) │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐      ┌──────────────┐
-│  Data Fetcher   │◄─────┤ Price Oracle │
-└────────┬────────┘      └──────────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Health Checker  │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐      ┌──────────────┐
-│   Liquidator    │──────►│ Fuel Network │
-└────────┬────────┘      └──────────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Telegram Client │
-└─────────────────┘
-```
-
-## Installation
-
-```bash
-# Clone the repository
-git clone <repository-url>
-cd axios-liquidation-bot
-
-# Install dependencies
-npm install
-
-# Copy environment template
-cp .env.example .env
-
-# Edit .env with your configuration
-nano .env
-```
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `FUEL_PRIVATE_KEY` | Private key for liquidation wallet | ✅ |
-| `FUEL_RPC_URL` | Fuel Network RPC endpoint | ✅ |
-| `LOAN_CONTRACT_ID` | Axios loan contract address | ✅ |
-| `SUPABASE_URL` | Supabase project URL | ✅ |
-| `SUPABASE_ANON_KEY` | Supabase anonymous key | ✅ |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token | ✅ |
-| `TELEGRAM_CHAT_ID` | Telegram group chat ID | ✅ |
-| `PRICE_API_PROVIDER` | Price oracle provider | ❌ (default: coingecko) |
-| `SCAN_INTERVAL_MS` | Scan frequency in milliseconds | ❌ (default: 60000) |
-| `HEALTH_FACTOR_THRESHOLD` | Liquidation threshold | ❌ (default: 1.0) |
-| `DRY_RUN` | Enable dry-run mode | ❌ (default: false) |
-
-See [`.env.example`](.env.example) for complete configuration template.
-
-## Usage
-
-### Development Mode
-```bash
-# Run with auto-reload
-npm run dev
-```
-
-### Production Mode
-```bash
-# Build TypeScript
-npm run build
-
-# Run compiled code
-npm start
-```
-
-### Dry Run Mode
-```bash
-# Test without executing liquidations
-npm run dry-run
-```
-
-## Project Structure
-
-```
-axios-liquidation-bot/
-├── src/
-│   ├── index.ts              # Main bot orchestrator
-│   ├── fetcher.ts            # Supabase data fetcher
-│   ├── health-checker.ts     # Health factor calculator
-│   ├── liquidator.ts         # Fuel Network liquidator
-│   ├── price-client.ts       # Price oracle client
-│   ├── telegram-client.ts    # Telegram notifications
-│   └── utils/
-│       ├── logger.ts         # Logging utility
-│       └── timestamp.ts      # TAI64 conversion
-├── config/
-│   └── config.ts             # Configuration loader
-├── .env.example              # Environment template
-├── package.json
-├── tsconfig.json
-└── README.md
+```mermaid
+graph TD
+    Timer[Timer 5m] --> Fetcher[Supabase Fetcher]
+    Fetcher -->|Active Loans| Oracle[Price Oracle]
+    Oracle -->|CoinMarketCap| Engine[Decision Engine]
+    
+    Engine --> Check1{Is Expired?}
+    Engine --> Check2{Health Factor < 1.0?}
+    
+    Check1 -->|Yes| Liquidate[Liquidator]
+    Check2 -->|Yes| Liquidate
+    
+    Liquidate -->|Execute| Fuel[Fuel Network]
+    Liquidate -->|Notify| Telegram[Telegram Bot]
 ```
 
 ## How It Works
 
-### 1. Scan Cycle
-Every `SCAN_INTERVAL_MS` (default: 1 minute):
-1. Fetch all active loans from Supabase
-2. For each loan:
-   - Check if duration expired (TAI64 → Unix conversion)
-   - If not expired, calculate health factor:
-     ```
-     Health Factor = (Collateral Value USD) / (Loan Value USD)
-     ```
-   - If health factor < threshold (default: 1.0), mark for liquidation
+### 1. The Core Loop (Every 5 Minutes)
+The bot wakes up on a set interval (`SCAN_INTERVAL_MS=300000`) and acts as a central decision engine. It does not blindly fire transactions; it follows a rigorous check-process.
 
-### 2. Liquidation Execution
-For each loan marked for liquidation:
-1. Call `liquidate_loan(loan_id)` on Fuel contract
-2. Retry up to `MAX_RETRIES` times on failure
-3. Send Telegram notification with result
+### 2. Four-Step Process
+
+#### **Step 1: Data Gathering (Indexer Sync)**
+*   **Action**: Queries your **Supabase Indexer** (`loans` table).
+*   **What it gets**: A list of all `active` loans, including their collateral amounts, loan amounts, and expiration timestamps.
+*   *Why Indexer?* Querying the blockchain for "all loans" is slow/expensive. The indexer provides instant state access.
+
+#### **Step 2: Oracle Price Check**
+*   **Action**: Fetches real-time prices for assets (e.g., ETH, FUEL, USDC).
+*   **Source**: **CoinMarketCap API** (with CoinGecko/Pyth as fallbacks).
+*   **Caching**: Prices are cached for 30 seconds to save API credits and speed up processing.
+
+#### **Step 3: Risk Analysis (The Decision Engine)**
+For every active loan, it runs two checks locally:
+
+1.  **⏰ Expiration Check**:
+    *   Is `current_time > loan.ends_at`?
+    *   **Yes** → Liquidate immediately (Time-based default).
+
+2.  **📉 Health Factor Check**:
+    *   Calculates: `Health Factor = (Collateral Value in USD) / (Loan Debt in USD)`
+    *   Is `Health Factor < 1.0` (or `HEALTH_FACTOR_THRESHOLD`)?
+    *   **Yes** → Liquidate immediately (Undercollateralized default).
+
+#### **Step 4: Execution (On-Chain)**
+If a loan fails a check:
+1.  **Gas Check**: Verifies the bot's wallet has enough ETH.
+2.  **Transaction**: Calls the `liquidate_loan(loan_id)` function on the Axios Smart Contract.
+    *   *Note*: Sends the transaction via the Fuel SDK (`fuels`).
+3.  **Retry Logic**: If the network is congested, it retries up to 3 times with exponential backoff.
 
 ### 3. Notifications
-- **Scan Complete**: Sent after each cycle
-- **Liquidation Event**: Sent for each liquidation
-- **Error Alert**: Sent on failures
+*   **Scan Complete**: Sent after each cycle
+*   **Liquidation Event**: Sent for each liquidation
+*   **Error Alert**: Sent on failures
 
 ## Development
 
@@ -171,57 +96,6 @@ The contract interaction is currently a TODO. To implement:
    const tx = await contract.functions.liquidate_loan(loanId).call();
    await tx.waitForResult();
    ```
-
-### Testing
-
-```bash
-# Run tests
-npm test
-
-# Run with coverage
-npm test -- --coverage
-```
-
-## Security
-
-> [!CAUTION]
-> **Critical Security Requirements**
-
-- ✅ Never commit `.env` file
-- ✅ Store private keys in environment variables only
-- ✅ Use minimal gas ETH in liquidation wallet
-- ✅ Regularly rotate private keys
-- ✅ Monitor wallet balance for suspicious activity
-- ✅ Use separate wallets for different environments
-
-## Deployment
-
-### Railway / Render
-```bash
-# Set environment variables in dashboard
-# Deploy from GitHub repository
-```
-
-### Docker
-```bash
-# Build image
-docker build -t axios-liquidation-bot .
-
-# Run container
-docker run -d --env-file .env axios-liquidation-bot
-```
-
-### PM2 (Process Manager)
-```bash
-# Install PM2
-npm install -g pm2
-
-# Start bot
-pm2 start dist/index.js --name liquidation-bot
-
-# Monitor
-pm2 logs liquidation-bot
-```
 
 ## Monitoring
 
@@ -256,23 +130,3 @@ All events are logged to the configured Telegram group for transparency.
 - Ensure bot is added to the group
 - Check bot has permission to send messages
 
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make changes with tests
-4. Submit a pull request
-
-## License
-
-MIT
-
-## Support
-
-For issues and questions:
-- GitHub Issues: <repository-url>/issues
-- Telegram: @axios-finance
-
----
-
-**Built with ❤️ for Axios Finance**
