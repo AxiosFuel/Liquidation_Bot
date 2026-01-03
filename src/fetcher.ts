@@ -28,7 +28,13 @@ export class SupabaseFetcher {
     constructor() {
         this.client = createClient(
             config.supabase.url,
-            config.supabase.anonKey
+            config.supabase.anonKey,
+            {
+                auth: {
+                    persistSession: false,
+                    autoRefreshToken: false,
+                },
+            }
         );
     }
 
