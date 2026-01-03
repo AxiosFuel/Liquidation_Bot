@@ -24,7 +24,7 @@
         "@supabase/supabase-js": "^2.39.0",
         "axios": "^1.6.2",
         "dotenv": "^16.3.1",
-        "fuels": "^0.96.1",
+        "fuels": "^0.102.0",
         "node-telegram-bot-api": "^0.66.0"
     },
     "devDependencies": {

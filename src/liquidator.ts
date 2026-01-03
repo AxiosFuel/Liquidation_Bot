@@ -30,8 +30,8 @@ export class Liquidator {
     async initialize(): Promise<void> {
         if (this.initialized) return;
 
-        // Initialize provider
-        this.provider = await Provider.create(config.fuel.rpcUrl);
+        // Initialize provider (SDK v0.102.0+ uses direct constructor)
+        this.provider = await new Provider(config.fuel.rpcUrl);
 
         // Initialize wallet with private key (WalletUnlocked for signing)
         this.wallet = new WalletUnlocked(config.fuel.privateKey, this.provider);
@@ -62,12 +62,13 @@ export class Liquidator {
 
             logger.info(`Liquidating loan ${loanId}`, { loanId });
 
-            // Import the contract ABI and Contract class
-            const { AXIOS_ABI } = await import('./abi/axios-abi');
+            // Use minimal ABI to avoid "Maximum call stack size exceeded" bug
+            // in Fuel SDK v0.96.x caused by complex generic types in full ABI
+            const { AXIOS_ABI_MINIMAL } = await import('./abi/axios-abi-minimal');
             const { Contract } = await import('fuels');
 
             // Create contract instance with wallet (wallet is an Account)
-            const contract = new Contract(this.contractId, AXIOS_ABI as any, this.wallet);
+            const contract = new Contract(this.contractId, AXIOS_ABI_MINIMAL as any, this.wallet);
 
             // Call liquidate_loan function
             const loanIdNum = Number(loanId);
