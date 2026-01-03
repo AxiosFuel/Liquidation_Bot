@@ -62,13 +62,11 @@ export class Liquidator {
 
             logger.info(`Liquidating loan ${loanId}`, { loanId });
 
-            // Use minimal ABI to avoid "Maximum call stack size exceeded" bug
-            // in Fuel SDK v0.96.x caused by complex generic types in full ABI
-            const { AXIOS_ABI_MINIMAL } = await import('./abi/axios-abi-minimal');
-            const { Contract } = await import('fuels');
+            // Use typegen-generated contract class (properly handles ABI types)
+            const { AxiosFuelCore } = await import('./abitypes/AxiosFuelCore');
 
-            // Create contract instance with wallet (wallet is an Account)
-            const contract = new Contract(this.contractId, AXIOS_ABI_MINIMAL as any, this.wallet);
+            // Create contract instance with the wallet
+            const contract = new AxiosFuelCore(this.contractId, this.wallet);
 
             // Call liquidate_loan function
             const loanIdNum = Number(loanId);
