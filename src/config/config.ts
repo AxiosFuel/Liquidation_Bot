@@ -40,6 +40,8 @@ export interface Config {
         dryRun: boolean;
         gasMultiplier: number;
         maxRetries: number;
+        preFlightValidation: boolean;  // Enable on-chain status check before liquidation
+        alertOnRaceConditions: boolean; // Send Telegram alerts for race conditions
     };
 
     // Logging
@@ -94,6 +96,8 @@ function loadConfig(): Config {
             dryRun: process.env.DRY_RUN === 'true',
             gasMultiplier: parseFloat(process.env.GAS_MULTIPLIER || '1.2'),
             maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
+            preFlightValidation: process.env.PRE_FLIGHT_VALIDATION !== 'false', // Default: true
+            alertOnRaceConditions: process.env.ALERT_ON_RACE_CONDITIONS === 'true', // Default: false
         },
         logging: {
             level: (process.env.LOG_LEVEL || 'info') as 'debug' | 'info' | 'warn' | 'error',

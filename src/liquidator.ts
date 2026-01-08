@@ -67,9 +67,50 @@ export class Liquidator {
 
             // Create contract instance with the wallet
             const contract = new AxiosFuelCore(this.contractId, this.wallet);
+            const loanIdNum = Number(loanId);
+
+            // PRE-FLIGHT VALIDATION: Check on-chain status before attempting liquidation
+            if (config.bot.preFlightValidation) {
+                try {
+                    const { value: status } = await contract.functions
+                        .get_loan_status(loanIdNum)
+                        .dryRun();
+
+                    const statusNum = Number(status);
+
+                    if (statusNum !== 2) {
+                        const statusMap: Record<number, string> = {
+                            0: 'requested',
+                            1: 'cancelled',
+                            2: 'active',
+                            3: 'repaid',
+                            4: 'liquidated',
+                            5: 'claimed',
+                        };
+
+                        const statusName = statusMap[statusNum] || 'unknown';
+                        logger.warn(`Pre-flight check: Loan ${loanId} is not active (status=${statusName})`, {
+                            loanId,
+                            status: statusNum,
+                            statusName,
+                        });
+
+                        return {
+                            success: false,
+                            error: `Loan not active (status=${statusName})`,
+                        };
+                    }
+
+                    logger.debug(`Pre-flight check passed for loan ${loanId}`, { loanId });
+                } catch (preFlightError) {
+                    logger.warn(`Pre-flight check failed for loan ${loanId}, proceeding anyway`, {
+                        loanId,
+                        error: preFlightError instanceof Error ? preFlightError.message : 'Unknown error',
+                    });
+                }
+            }
 
             // Call liquidate_loan function
-            const loanIdNum = Number(loanId);
             const { waitForResult } = await contract.functions
                 .liquidate_loan(loanIdNum)
                 .call();
@@ -88,7 +129,16 @@ export class Liquidator {
             };
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            logger.error(`Failed to liquidate loan ${loanId}`, error);
+
+            // Categorize error types
+            if (errorMessage.includes('ECannotLiquidate')) {
+                logger.warn(`Loan ${loanId} cannot be liquidated (likely race condition)`, {
+                    loanId,
+                    error: errorMessage,
+                });
+            } else {
+                logger.error(`Failed to liquidate loan ${loanId}`, error);
+            }
 
             return {
                 success: false,

@@ -159,20 +159,34 @@ export class LiquidationBot {
                     txHash: result.txHash,
                 });
             } else {
-                // Send error notification
-                await this.telegramClient.sendErrorAlert(
-                    `Liquidation failed for loan ${loanId}`,
-                    {
-                        loanId,
-                        reason,
-                        error: result.error,
-                    }
-                );
+                // Categorize error type
+                const isRaceCondition = result.error?.includes('ECannotLiquidate') ||
+                    result.error?.includes('not active');
 
-                logger.error(`Liquidation failed for loan ${loanId}`, {
-                    loanId,
-                    error: result.error,
-                });
+                // Only send Telegram alert if it's not a race condition, or if configured to alert on race conditions
+                if (!isRaceCondition || config.bot.alertOnRaceConditions) {
+                    await this.telegramClient.sendErrorAlert(
+                        `Liquidation failed for loan ${loanId}`,
+                        {
+                            loanId,
+                            reason,
+                            error: result.error,
+                            raceCondition: isRaceCondition,
+                        }
+                    );
+                }
+
+                if (isRaceCondition) {
+                    logger.warn(`Liquidation skipped for loan ${loanId} (race condition)`, {
+                        loanId,
+                        error: result.error,
+                    });
+                } else {
+                    logger.error(`Liquidation failed for loan ${loanId}`, {
+                        loanId,
+                        error: result.error,
+                    });
+                }
             }
         } catch (error) {
             logger.error(`Error executing liquidation for loan ${loanId}`, error);
