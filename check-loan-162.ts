@@ -92,7 +92,7 @@ async function main() {
         console.log(`   Internal Flag:   ${loan.liquidation?.liquidation_flag_internal ? 'true' : 'false'}`);
 
         console.log(`\n📝 Summary:`);
-        if (status !== 2) {
+        if (Number(status) !== 2) {
             console.log(`   ❌ Loan is not active (status=${status}). Cannot liquidate.`);
         } else if (!isOracleLiq && !isExpired) {
             console.log(`   ❌ Loan is not oracle-based AND not expired. Cannot liquidate.`);

@@ -47,6 +47,7 @@ export class PriceClient {
             return cached.price;
         }
 
+        // Try primary provider first
         try {
             let price: number;
 
@@ -75,9 +76,38 @@ export class PriceClient {
 
             logger.debug(`Fetched price for ${asset}`, { price, provider: this.provider });
             return price;
-        } catch (error) {
-            logger.error(`Failed to fetch price for ${asset}`, error);
-            throw error;
+        } catch (primaryError) {
+            // Check if it's a rate limit error (429) or other failure
+            const isRateLimitError = axios.isAxiosError(primaryError) && primaryError.response?.status === 429;
+
+            if (isRateLimitError) {
+                logger.warn(`Primary provider ${this.provider} rate limited for ${asset}, trying fallback...`);
+            } else {
+                logger.warn(`Primary provider ${this.provider} failed for ${asset}, trying fallback...`, primaryError);
+            }
+
+            // Try CoinGecko as fallback if it's not already the primary provider
+            if (this.provider !== 'coingecko') {
+                try {
+                    const price = await this.getPriceFromCoinGecko(asset);
+
+                    // Cache the fallback price
+                    this.cache.set(asset, {
+                        price,
+                        expiry: Date.now() + this.CACHE_TTL_MS,
+                    });
+
+                    logger.info(`Fetched price for ${asset} using fallback (CoinGecko)`, { price });
+                    return price;
+                } catch (fallbackError) {
+                    logger.error(`Fallback provider (CoinGecko) also failed for ${asset}`, fallbackError);
+                    throw new Error(`All price providers failed for ${asset}`);
+                }
+            }
+
+            // If CoinGecko was the primary and it failed, no fallback available
+            logger.error(`Failed to fetch price for ${asset}`, primaryError);
+            throw primaryError;
         }
     }
 
@@ -92,7 +122,7 @@ export class PriceClient {
             USDC: 'usd-coin',
             USDT: 'tether',
             DAI: 'dai',
-            FUEL: 'fuel-network', // Assuming 'fuel-network' is the ID on CoinGecko, or might need to check
+            FUEL: 'fuel-network',
             // Add more mappings as needed
         };
 
@@ -101,7 +131,13 @@ export class PriceClient {
             throw new Error(`Unknown asset for CoinGecko: ${asset}`);
         }
 
-        const response = await this.client.get('/simple/price', {
+        // Create dedicated CoinGecko client (free tier, no API key needed)
+        const coingeckoClient = axios.create({
+            baseURL: 'https://api.coingecko.com/api/v3',
+            timeout: 10000,
+        });
+
+        const response = await coingeckoClient.get('/simple/price', {
             params: {
                 ids: coinId,
                 vs_currencies: 'usd',
