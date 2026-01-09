@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
+import { HermesClient } from '@pythnetwork/hermes-client';
 import { config } from './config/config';
 import { logger } from './utils/logger';
 import { getSymbolFromAssetId } from './utils/assets';
@@ -13,16 +14,31 @@ export interface PriceData {
 }
 
 /**
- * Price client for fetching asset prices from external APIs
+ * Pyth Price Feed IDs for supported assets
+ * @see https://pyth.network/developers/price-feed-ids
+ */
+const PYTH_PRICE_FEED_IDS: Record<string, string> = {
+    ETH: '0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace',
+    BTC: '0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43',
+    USDC: '0xeaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a',
+    USDT: '0x2b89b9dc8fdf9f34709a5b106b472f0f39bb6ca9ce04b0fd7f2e971688e2e53b',
+    FUEL: '0x8a757d54ec4d75ad5a3e3a982e9e9d4f1f6d7f9eb3a0b8a7c6f5d4e3c2b1a09f', // FUEL/USD
+};
+
+/**
+ * Price client with multi-provider fallback: Primary → CoinGecko → Pyth
  */
 export class PriceClient {
     private client: AxiosInstance;
     private provider: string;
     private cache: Map<string, { price: number; expiry: number }>;
-    private readonly CACHE_TTL_MS = 30000; // 30 seconds
+    private readonly cacheTtlMs: number;
+    private hermesClient: HermesClient;
 
     constructor() {
         this.provider = config.priceOracle.provider;
+        this.cacheTtlMs = config.priceOracle.cacheTtlMs;
+
         this.client = axios.create({
             baseURL: config.priceOracle.url,
             timeout: 10000,
@@ -30,11 +46,20 @@ export class PriceClient {
                 ? { 'X-API-Key': config.priceOracle.apiKey }
                 : {},
         });
+
         this.cache = new Map();
+        this.hermesClient = new HermesClient(config.priceOracle.pythHermesUrl);
+
+        logger.info('PriceClient initialized', {
+            provider: this.provider,
+            cacheTtlMs: this.cacheTtlMs,
+            pythHermesUrl: config.priceOracle.pythHermesUrl,
+            hasCoinGeckoKey: !!config.priceOracle.coingeckoApiKey,
+        });
     }
 
     /**
-     * Get price for an asset in USD
+     * Get price for an asset in USD with multi-provider fallback
      */
     async getPrice(assetId: string): Promise<number> {
         // Resolve symbol from asset ID
@@ -71,7 +96,7 @@ export class PriceClient {
             // Cache the price
             this.cache.set(asset, {
                 price,
-                expiry: Date.now() + this.CACHE_TTL_MS,
+                expiry: Date.now() + this.cacheTtlMs,
             });
 
             logger.debug(`Fetched price for ${asset}`, { price, provider: this.provider });
@@ -86,33 +111,55 @@ export class PriceClient {
                 logger.warn(`Primary provider ${this.provider} failed for ${asset}, trying fallback...`, primaryError);
             }
 
-            // Try CoinGecko as fallback if it's not already the primary provider
-            if (this.provider !== 'coingecko') {
-                try {
-                    const price = await this.getPriceFromCoinGecko(asset);
-
-                    // Cache the fallback price
-                    this.cache.set(asset, {
-                        price,
-                        expiry: Date.now() + this.CACHE_TTL_MS,
-                    });
-
-                    logger.info(`Fetched price for ${asset} using fallback (CoinGecko)`, { price });
-                    return price;
-                } catch (fallbackError) {
-                    logger.error(`Fallback provider (CoinGecko) also failed for ${asset}`, fallbackError);
-                    throw new Error(`All price providers failed for ${asset}`);
-                }
-            }
-
-            // If CoinGecko was the primary and it failed, no fallback available
-            logger.error(`Failed to fetch price for ${asset}`, primaryError);
-            throw primaryError;
+            // Try fallback chain: CoinGecko → Pyth
+            return this.tryFallbackProviders(asset);
         }
     }
 
     /**
-     * Get price from CoinGecko API
+     * Try fallback providers in order: CoinGecko → Pyth
+     */
+    private async tryFallbackProviders(asset: string): Promise<number> {
+        const fallbacks: Array<{ name: string; fn: () => Promise<number> }> = [];
+
+        // Add CoinGecko if not primary
+        if (this.provider !== 'coingecko') {
+            fallbacks.push({
+                name: 'CoinGecko',
+                fn: () => this.getPriceFromCoinGecko(asset),
+            });
+        }
+
+        // Always add Pyth as last resort (no rate limits)
+        if (this.provider !== 'pyth') {
+            fallbacks.push({
+                name: 'Pyth',
+                fn: () => this.getPriceFromPyth(asset),
+            });
+        }
+
+        for (const fallback of fallbacks) {
+            try {
+                const price = await fallback.fn();
+
+                // Cache the fallback price
+                this.cache.set(asset, {
+                    price,
+                    expiry: Date.now() + this.cacheTtlMs,
+                });
+
+                logger.info(`Fetched price for ${asset} using fallback (${fallback.name})`, { price });
+                return price;
+            } catch (error) {
+                logger.warn(`Fallback ${fallback.name} failed for ${asset}`, error);
+            }
+        }
+
+        throw new Error(`All price providers failed for ${asset}`);
+    }
+
+    /**
+     * Get price from CoinGecko API (with optional Demo API key)
      */
     private async getPriceFromCoinGecko(asset: string): Promise<number> {
         // Map asset symbols to CoinGecko IDs
@@ -123,7 +170,6 @@ export class PriceClient {
             USDT: 'tether',
             DAI: 'dai',
             FUEL: 'fuel-network',
-            // Add more mappings as needed
         };
 
         const coinId = idMap[asset.toUpperCase()];
@@ -131,10 +177,17 @@ export class PriceClient {
             throw new Error(`Unknown asset for CoinGecko: ${asset}`);
         }
 
-        // Create dedicated CoinGecko client (free tier, no API key needed)
+        // Build headers - include API key if available
+        const headers: Record<string, string> = {};
+        if (config.priceOracle.coingeckoApiKey) {
+            headers['x-cg-demo-api-key'] = config.priceOracle.coingeckoApiKey;
+        }
+
+        // Create dedicated CoinGecko client
         const coingeckoClient = axios.create({
             baseURL: 'https://api.coingecko.com/api/v3',
             timeout: 10000,
+            headers,
         });
 
         const response = await coingeckoClient.get('/simple/price', {
@@ -156,21 +209,14 @@ export class PriceClient {
      * Get price from CoinMarketCap API
      */
     private async getPriceFromCoinMarketCap(asset: string): Promise<number> {
-        // CMC uses standard symbols usually, but we can verify
         const symbol = asset.toUpperCase();
 
         try {
-            // Using quotes/latest endpoint
-            // Headers for CMC are usually 'X-CMC_PRO_API_KEY'
             const response = await this.client.get('/v1/cryptocurrency/quotes/latest', {
                 params: {
                     symbol: symbol,
                     convert: 'USD',
                 },
-                // Override headers if needed, though config should have set X-API-Key which might need adjustment
-                // Config sets 'X-API-Key'. CMC expects 'X-CMC_PRO_API_KEY'.
-                // We'll adjust the header here if the config one isn't right, or rely on the user to set it correctly in config if strictly generic.
-                // Better to force the correct header for CMC here.
                 headers: {
                     'X-CMC_PRO_API_KEY': config.priceOracle.apiKey
                 }
@@ -196,11 +242,43 @@ export class PriceClient {
     }
 
     /**
-     * Get price from Pyth Network
-     * TODO: Implement Pyth integration
+     * Get price from Pyth Network via Hermes API
      */
-    private async getPriceFromPyth(_asset: string): Promise<number> {
-        throw new Error('Pyth integration not yet implemented');
+    private async getPriceFromPyth(asset: string): Promise<number> {
+        const feedId = PYTH_PRICE_FEED_IDS[asset.toUpperCase()];
+        if (!feedId) {
+            throw new Error(`Unknown asset for Pyth: ${asset}`);
+        }
+
+        try {
+            const priceUpdates = await this.hermesClient.getLatestPriceUpdates([feedId]);
+
+            if (!priceUpdates?.parsed || priceUpdates.parsed.length === 0) {
+                throw new Error(`No price update found for ${asset}`);
+            }
+
+            const priceFeed = priceUpdates.parsed[0];
+            const priceData = priceFeed.price;
+
+            // Pyth prices are in fixed-point format with an exponent
+            // price * 10^expo = actual price
+            const price = Number(priceData.price) * Math.pow(10, priceData.expo);
+
+            if (isNaN(price) || price <= 0) {
+                throw new Error(`Invalid Pyth price for ${asset}: ${price}`);
+            }
+
+            logger.debug(`Pyth price for ${asset}`, {
+                rawPrice: priceData.price,
+                expo: priceData.expo,
+                computedPrice: price
+            });
+
+            return price;
+        } catch (error) {
+            logger.error(`Pyth API Error for ${asset}`, error);
+            throw error;
+        }
     }
 
     /**

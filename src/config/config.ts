@@ -25,6 +25,9 @@ export interface Config {
         provider: 'coingecko' | 'coinmarketcap' | 'pyth' | 'chainlink';
         url: string;
         apiKey?: string;
+        coingeckoApiKey?: string;  // CoinGecko Demo API key for higher rate limits
+        pythHermesUrl: string;     // Pyth Hermes endpoint URL
+        cacheTtlMs: number;        // Price cache TTL in milliseconds
     };
 
     // Telegram
@@ -85,6 +88,9 @@ function loadConfig(): Config {
             provider: (process.env.PRICE_API_PROVIDER || 'coingecko') as 'coingecko' | 'coinmarketcap' | 'pyth' | 'chainlink',
             url: process.env.PRICE_API_URL || 'https://api.coingecko.com/api/v3',
             apiKey: process.env.PRICE_API_KEY,
+            coingeckoApiKey: process.env.COINGECKO_API_KEY,
+            pythHermesUrl: process.env.PYTH_HERMES_URL || 'https://hermes.pyth.network',
+            cacheTtlMs: parseInt(process.env.PRICE_CACHE_TTL_MS || '300000', 10), // 5 min default
         },
         telegram: {
             botToken: process.env.TELEGRAM_BOT_TOKEN!,
