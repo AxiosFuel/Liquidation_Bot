@@ -21,7 +21,8 @@ async function testPriceFetching() {
     for (const asset of testAssets) {
         try {
             const price = await priceClient.getPrice(asset);
-            console.log(`✅ ${asset.padEnd(6)} $${price.toFixed(2)}`);
+            const decimals = price < 0.01 ? 8 : 2;
+            console.log(`✅ ${asset.padEnd(6)} $${price.toFixed(decimals)}`);
         } catch (error: any) {
             console.error(`❌ ${asset.padEnd(6)} Failed: ${error.message}`);
         }

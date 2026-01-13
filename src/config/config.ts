@@ -22,11 +22,13 @@ export interface Config {
 
     // Price Oracle
     priceOracle: {
-        provider: 'coingecko' | 'coinmarketcap' | 'pyth' | 'chainlink';
+        provider: 'coingecko' | 'coinmarketcap' | 'pyth' | 'chainlink' | 'stork';
         url: string;
         apiKey?: string;
         coingeckoApiKey?: string;  // CoinGecko Demo API key for higher rate limits
         pythHermesUrl: string;     // Pyth Hermes endpoint URL
+        storkApiKey?: string;      // Stork Oracle API key (partnership)
+        storkUrl: string;          // Stork Oracle API endpoint
         cacheTtlMs: number;        // Price cache TTL in milliseconds
     };
 
@@ -85,11 +87,13 @@ function loadConfig(): Config {
             anonKey: process.env.SUPABASE_ANON_KEY!,
         },
         priceOracle: {
-            provider: (process.env.PRICE_API_PROVIDER || 'coingecko') as 'coingecko' | 'coinmarketcap' | 'pyth' | 'chainlink',
+            provider: (process.env.PRICE_API_PROVIDER || 'stork') as 'coingecko' | 'coinmarketcap' | 'pyth' | 'chainlink' | 'stork',
             url: process.env.PRICE_API_URL || 'https://api.coingecko.com/api/v3',
             apiKey: process.env.PRICE_API_KEY,
             coingeckoApiKey: process.env.COINGECKO_API_KEY,
             pythHermesUrl: process.env.PYTH_HERMES_URL || 'https://hermes.pyth.network',
+            storkApiKey: process.env.STORK_API_KEY,
+            storkUrl: process.env.STORK_API_URL || 'https://rest.jp.stork-oracle.network',
             cacheTtlMs: parseInt(process.env.PRICE_CACHE_TTL_MS || '300000', 10), // 5 min default
         },
         telegram: {

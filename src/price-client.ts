@@ -27,6 +27,72 @@ const PYTH_PRICE_FEED_IDS: Record<string, string> = {
 };
 
 /**
+ * Stork Oracle asset ID mapping
+ * Format: {SYMBOL}USD (e.g., FUELUSD, ETHUSD, USDCUSD)
+ */
+const STORK_ASSET_IDS: Record<string, string> = {
+    ETH: 'ETHUSD',
+    BTC: 'BTCUSD',
+    USDC: 'USDCUSD',
+    USDT: 'USDTUSD',
+    FUEL: 'FUELUSD',
+};
+
+/**
+ * Stork Oracle API Response Types
+ */
+interface StorkSignature {
+    r: string;
+    s: string;
+    v: string;
+}
+
+interface StorkTimestampedSignature {
+    signature: StorkSignature;
+    timestamp: number;
+    msg_hash: string;
+}
+
+interface StorkCalculationAlgorithm {
+    type: string;
+    version: string;
+    checksum: string;
+}
+
+interface StorkSignedPrice {
+    public_key: string;
+    encoded_asset_id: string;
+    price: string;
+    timestamped_signature: StorkTimestampedSignature;
+    publisher_merkle_root: string;
+    calculation_alg: StorkCalculationAlgorithm;
+}
+
+interface StorkPublisherSignedPrice {
+    publisher_key: string;
+    external_asset_id: string;
+    signature_type: string;
+    price: string;
+    timestamped_signature: StorkTimestampedSignature;
+}
+
+interface StorkAssetPrice {
+    timestamp: number;
+    asset_id: string;
+    signature_type: string;
+    trigger: string;
+    price: string;
+    stork_signed_price: StorkSignedPrice;
+    signed_prices: StorkPublisherSignedPrice[];
+}
+
+interface StorkPriceResponse {
+    data: {
+        [assetId: string]: StorkAssetPrice;
+    };
+}
+
+/**
  * Price client with multi-provider fallback: Primary → CoinGecko → Pyth
  */
 export class PriceClient {
@@ -55,7 +121,9 @@ export class PriceClient {
             provider: this.provider,
             cacheTtlMs: this.cacheTtlMs,
             pythHermesUrl: config.priceOracle.pythHermesUrl,
+            storkUrl: config.priceOracle.storkUrl,
             hasCoinGeckoKey: !!config.priceOracle.coingeckoApiKey,
+            hasStorkKey: !!config.priceOracle.storkApiKey,
         });
     }
 
@@ -78,6 +146,9 @@ export class PriceClient {
             let price: number;
 
             switch (this.provider) {
+                case 'stork':
+                    price = await this.getPriceFromStork(asset);
+                    break;
                 case 'coingecko':
                     price = await this.getPriceFromCoinGecko(asset);
                     break;
@@ -130,6 +201,14 @@ export class PriceClient {
     private async tryFallbackProviders(asset: string): Promise<number> {
         const fallbacks: Array<{ name: string; fn: () => Promise<number> }> = [];
 
+        // Add Stork if not primary (partnership API - most reliable)
+        if (this.provider !== 'stork' && STORK_ASSET_IDS[asset.toUpperCase()]) {
+            fallbacks.push({
+                name: 'Stork',
+                fn: () => this.getPriceFromStork(asset),
+            });
+        }
+
         // Add CoinGecko if not primary
         if (this.provider !== 'coingecko') {
             fallbacks.push({
@@ -139,7 +218,7 @@ export class PriceClient {
         }
 
         // Always add Pyth as last resort (no rate limits)
-        if (this.provider !== 'pyth') {
+        if (this.provider !== 'pyth' && PYTH_PRICE_FEED_IDS[asset.toUpperCase()]) {
             fallbacks.push({
                 name: 'Pyth',
                 fn: () => this.getPriceFromPyth(asset),
@@ -295,6 +374,62 @@ export class PriceClient {
      */
     private async getPriceFromChainlink(_asset: string): Promise<number> {
         throw new Error('Chainlink integration not yet implemented');
+    }
+
+    /**
+     * Get price from Stork Oracle API (partnership)
+     * @see https://rest.jp.stork-oracle.network
+     */
+    private async getPriceFromStork(asset: string): Promise<number> {
+        const assetId = STORK_ASSET_IDS[asset.toUpperCase()];
+        if (!assetId) {
+            throw new Error(`Unknown asset for Stork: ${asset}`);
+        }
+
+        if (!config.priceOracle.storkApiKey) {
+            throw new Error('Stork API key not configured');
+        }
+
+        try {
+            const response = await axios.get<StorkPriceResponse>(
+                `${config.priceOracle.storkUrl}/v1/prices/latest`,
+                {
+                    params: { assets: assetId },
+                    headers: {
+                        'Authorization': config.priceOracle.storkApiKey,
+                        'Accept': '*/*',
+                    },
+                    timeout: 10000,
+                }
+            );
+
+            const priceData = response.data?.data?.[assetId];
+            if (!priceData) {
+                throw new Error(`Price not found for ${asset} (${assetId})`);
+            }
+
+            // Stork prices are in 18-decimal format, divide by 10^18
+            const rawPrice = BigInt(priceData.price);
+            const price = Number(rawPrice) / 1e18;
+
+            if (isNaN(price) || price <= 0) {
+                throw new Error(`Invalid Stork price for ${asset}: ${price}`);
+            }
+
+            logger.debug(`Stork price for ${asset}`, {
+                assetId,
+                rawPrice: priceData.price,
+                computedPrice: price,
+                timestamp: priceData.timestamp,
+            });
+
+            return price;
+        } catch (error) {
+            if (axios.isAxiosError(error)) {
+                logger.error(`Stork API Error: ${error.response?.status} - ${JSON.stringify(error.response?.data)}`);
+            }
+            throw error;
+        }
     }
 
     /**
