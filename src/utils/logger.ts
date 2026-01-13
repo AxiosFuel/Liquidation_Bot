@@ -27,7 +27,10 @@ class Logger {
         const prefix = `[${timestamp}] [${level.toUpperCase()}]`;
 
         if (data) {
-            return `${prefix} ${message} ${JSON.stringify(data, null, 2)}`;
+            const logData = data instanceof Error
+                ? { ...data, message: data.message, stack: data.stack }
+                : data;
+            return `${prefix} ${message} ${JSON.stringify(logData, null, 2)}`;
         }
         return `${prefix} ${message}`;
     }

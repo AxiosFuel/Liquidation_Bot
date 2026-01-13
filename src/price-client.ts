@@ -99,6 +99,7 @@ export class PriceClient {
     private client: AxiosInstance;
     private provider: string;
     private cache: Map<string, { price: number; expiry: number }>;
+    private pendingRequests: Map<string, Promise<number>>;
     private readonly cacheTtlMs: number;
     private hermesClient: HermesClient;
 
@@ -115,6 +116,7 @@ export class PriceClient {
         });
 
         this.cache = new Map();
+        this.pendingRequests = new Map();
         this.hermesClient = new HermesClient(config.priceOracle.pythHermesUrl);
 
         logger.info('PriceClient initialized', {
@@ -141,7 +143,29 @@ export class PriceClient {
             return cached.price;
         }
 
-        // Try primary provider first
+        // Check for pending request (request coalescing)
+        if (this.pendingRequests.has(asset)) {
+            logger.debug(`Using pending request for ${asset}`);
+            return this.pendingRequests.get(asset)!;
+        }
+
+        // Create new request promise
+        const requestPromise = (async () => {
+            try {
+                return await this.fetchPriceInternal(asset);
+            } finally {
+                this.pendingRequests.delete(asset);
+            }
+        })();
+
+        this.pendingRequests.set(asset, requestPromise);
+        return requestPromise;
+    }
+
+    /**
+     * Internal method to fetch price from providers (Primary -> Fallback)
+     */
+    private async fetchPriceInternal(asset: string): Promise<number> {
         try {
             let price: number;
 
